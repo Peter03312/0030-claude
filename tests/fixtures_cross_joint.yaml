@@ -1,0 +1,77 @@
+version: 1
+routes:
+  - id: R1
+    expected_polarity: normal
+    office: {a: {node: O1, port: oa}, b: {node: O1, port: ob}}
+    subscriber: {a: {node: S1, port: sa}, b: {node: S1, port: sb}}
+  - id: R2
+    expected_polarity: normal
+    office: {a: {node: O2, port: oa}, b: {node: O2, port: ob}}
+    subscriber: {a: {node: S2, port: sa}, b: {node: S2, port: sb}}
+segments:
+  # Two office feeds are tied into one conductive path through two separate joints.
+  - id: FEED1
+    pairs:
+      - pair: F1
+        a: {endpoints: [{node: O1, port: oa}, {node: J1, port: f1a}]}
+        b: {endpoints: [{node: O1, port: ob}, {node: J1, port: f1b}]}
+  - id: FEED_LINK
+    pairs:
+      - pair: F2
+        a: {endpoints: [{node: J1, port: f2a}, {node: J2, port: f2a}]}
+        b: {endpoints: [{node: J1, port: f2b}, {node: J2, port: f2b}]}
+  - id: FEED2
+    pairs:
+      - pair: F3
+        a: {endpoints: [{node: J2, port: f3a}, {node: O2, port: oa}]}
+        b: {endpoints: [{node: J2, port: f3b}, {node: O2, port: ob}]}
+  # Expected subscriber pairs exist as separate components, making the end-to-end mismatch visible.
+  - id: SUB1_CABLE
+    pairs:
+      - pair: U1
+        a: {endpoints: [{node: S1, port: sa}, {node: J3, port: s1a}]}
+        b: {endpoints: [{node: S1, port: sb}, {node: J3, port: s1b}]}
+      - pair: T1
+        a: {endpoints: [{node: T1, port: ta}, {node: J3, port: t1a}]}
+        b: {endpoints: [{node: T1, port: tb}, {node: J3, port: t1b}]}
+  - id: SUB2_CABLE
+    pairs:
+      - pair: U2
+        a: {endpoints: [{node: S2, port: sa}, {node: J4, port: s2a}]}
+        b: {endpoints: [{node: S2, port: sb}, {node: J4, port: s2b}]}
+      - pair: T2
+        a: {endpoints: [{node: T2, port: ta}, {node: J4, port: t2a}]}
+        b: {endpoints: [{node: T2, port: tb}, {node: J4, port: t2b}]}
+joints:
+  - id: J1
+    splices:
+      - a: {node: J1, port: f1a}
+        b: {node: J1, port: f2a}
+      - a: {node: J1, port: f1b}
+        b: {node: J1, port: f2b}
+  - id: J2
+    splices:
+      - a: {node: J2, port: f2a}
+        b: {node: J2, port: f3a}
+      - a: {node: J2, port: f2b}
+        b: {node: J2, port: f3b}
+  - id: J3
+    splices:
+      - a: {node: J3, port: s1a}
+        b: {node: J3, port: t1a}
+      - a: {node: J3, port: s1b}
+        b: {node: J3, port: t1b}
+  - id: J4
+    splices:
+      - a: {node: J4, port: s2a}
+        b: {node: J4, port: t2a}
+      - a: {node: J4, port: s2b}
+        b: {node: J4, port: t2b}
+caps: []
+open_ends:
+  - id: OPEN1
+    node: T1
+    ports: [ta, tb]
+  - id: OPEN2
+    node: T2
+    ports: [ta, tb]
