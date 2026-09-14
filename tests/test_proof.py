@@ -216,8 +216,17 @@ def test_uncapped_test_bridge_bypass_is_failure_with_physical_evidence():
 
 LOOP_MANIFEST = """
 version: 1
-routes: []
+routes:
+  - id: R0
+    expected_polarity: normal
+    office: {a: {node: O0, port: oa}, b: {node: O0, port: ob}}
+    subscriber: {a: {node: S0, port: sa}, b: {node: S0, port: sb}}
 segments:
+  - id: STRAIGHT
+    pairs:
+      - pair: P0
+        a: {endpoints: [{node: O0, port: oa}, {node: S0, port: sa}]}
+        b: {endpoints: [{node: O0, port: ob}, {node: S0, port: sb}]}
   - id: S1
     pairs:
       - pair: P1
@@ -262,6 +271,143 @@ def test_strict_unknown_field_is_422_and_topology_conflict_is_200():
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
     assert response.json()["serviceable"] is False
+
+
+def test_empty_manifest_is_structural_rejection_not_a_proof():
+    empty = """
+version: 1
+routes: []
+segments: []
+joints: []
+caps: []
+"""
+    response = client.post(
+        "/prove", content=textwrap.dedent(empty), headers={"Content-Type": "application/yaml"}
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "invalid_manifest"
+    assert body["serviceable"] is False
+    assert any(error["code"] == "empty_routes" for error in body["errors"])
+
+
+def test_duplicate_joint_port_across_splice_and_bridge_is_422_not_loop():
+    manifest = """
+version: 1
+routes:
+  - id: R1
+    expected_polarity: normal
+    office: {a: {node: O, port: oa}, b: {node: O, port: ob}}
+    subscriber: {a: {node: S, port: sa}, b: {node: S, port: sb}}
+segments:
+  - id: FEED
+    pairs:
+      - pair: PF
+        a: {endpoints: [{node: O, port: oa}, {node: J, port: pa}]}
+        b: {endpoints: [{node: O, port: ob}, {node: J, port: pb}]}
+      - pair: PQ
+        a: {endpoints: [{node: K1, port: qa}, {node: J, port: qa}]}
+        b: {endpoints: [{node: K1, port: qb}, {node: J, port: qb}]}
+      - pair: PT
+        a: {endpoints: [{node: K2, port: ta}, {node: J, port: ta}]}
+        b: {endpoints: [{node: K2, port: tb}, {node: J, port: tb}]}
+      - pair: PD
+        a: {endpoints: [{node: S, port: sa}, {node: K3, port: da}]}
+        b: {endpoints: [{node: S, port: sb}, {node: K3, port: db}]}
+joints:
+  - id: J
+    splices:
+      # Physical port pa is simultaneously spliced and claimed by the named bridge below.
+      - {a: {node: J, port: pa}, b: {node: J, port: qa}}
+    test_bridges:
+      - id: TB
+        a_ports: [pa, ta, qa]
+        b_ports: [pb, tb, qb]
+caps: []
+open_ends:
+  - {id: K, node: K2, ports: [ta, tb]}
+  - {id: K1O, node: K1, ports: [qa, qb]}
+  - {id: K3O, node: K3, ports: [da, db]}
+"""
+    response = client.post(
+        "/prove", content=textwrap.dedent(manifest), headers={"Content-Type": "application/yaml"}
+    )
+    assert response.status_code == 422
+    codes_ = [error["code"] for error in response.json()["errors"]]
+    assert "duplicate_port" in codes_
+    assert response.json()["status"] == "invalid_manifest"
+
+
+CROSSED_CAP_MANIFEST = """
+version: 1
+routes:
+  - id: R1
+    expected_polarity: normal
+    office: {a: {node: OFFICE, port: OA}, b: {node: OFFICE, port: OB}}
+    subscriber: {a: {node: SUB, port: SA}, b: {node: SUB, port: SB}}
+segments:
+  - id: FEED
+    pairs:
+      - pair: PF
+        a: {endpoints: [{node: OFFICE, port: OA}, {node: J1, port: inA}]}
+        b: {endpoints: [{node: OFFICE, port: OB}, {node: J1, port: inB}]}
+  - id: THROUGH
+    pairs:
+      - pair: PT
+        a: {endpoints: [{node: J1, port: outA}, {node: SUB, port: SA}]}
+        b: {endpoints: [{node: J1, port: outB}, {node: SUB, port: SB}]}
+  - id: BY
+    pairs:
+      - pair: PX
+        a: {endpoints: [{node: J1, port: tapA}, {node: J2, port: xA}]}
+        b: {endpoints: [{node: J1, port: tapB}, {node: J2, port: xB}]}
+  - id: TAIL
+    pairs:
+      - pair: PY
+        a: {endpoints: [{node: J2, port: yA}, {node: TIP, port: capA}]}
+        b: {endpoints: [{node: J2, port: yB}, {node: TIP, port: capB}]}
+joints:
+  - id: J1
+    splices: []
+    test_bridges:
+      - id: TB1
+        a_ports: [inA, outA, tapA]
+        b_ports: [inB, outB, tapB]
+  - id: J2
+    splices:
+      # One A/B swap in the sealed bypass crosses the cap legs.
+      - {a: {node: J2, port: xA}, b: {node: J2, port: yB}}
+      - {a: {node: J2, port: xB}, b: {node: J2, port: yA}}
+caps: [{id: CAP1, a: {node: TIP, port: capA}, b: {node: TIP, port: capB}}]
+open_ends: []
+"""
+
+
+def test_crossed_bridge_bypass_at_cap_is_failure_evidence():
+    report = analyze_text(CROSSED_CAP_MANIFEST)
+    assert report["status"] == "failed"
+    assert report["serviceable"] is False
+    assert "test_bridge_bypass_reversed" in codes(report)
+    route = report["routes"][0]
+    assert route["proved"] is False
+    assert route["test_bridge_bypasses"][0]["sealed"] is False
+
+
+def test_malformed_content_returns_structural_422_not_500():
+    nasty_cases = [
+        "version: 1\nroutes: null\nsegments: null\njoints: null\ncaps: null\n",
+        "version: 1\nroutes: 42\nsegments: 7\njoints: {}\ncaps: []\n",
+        "version: 1\nroutes: [{id: [1]}]\nsegments: []\njoints: []\ncaps: []\n",
+        "version: 1\nroutes: []\nsegments: [{id: s, pairs: 9}]\njoints: []\ncaps: []\n",
+        "&a {x: *a}\nversion: 1\n",
+    ]
+    for body in nasty_cases:
+        response = client.post(
+            "/prove", content=body, headers={"Content-Type": "application/yaml"}
+        )
+        assert response.status_code == 422, body
+        assert response.json()["status"] == "invalid_manifest"
+        assert response.json()["serviceable"] is False
 
 
 def test_requires_yaml_content_type():

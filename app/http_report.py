@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from .parser import ManifestError, parse_yaml
 from .proof import analyze_graph
 from .topology import TopologyBuildError, build_graph
+
+
+logger = logging.getLogger("cable_splicing.http")
 
 
 app = FastAPI(
@@ -60,6 +65,7 @@ async def prove(request: Request) -> Response:
     try:
         manifest = parse_yaml(text)
         graph = build_graph(manifest)
+        report = analyze_graph(graph)
     except ManifestError as exc:
         return _structural_response(
             [
@@ -69,11 +75,35 @@ async def prove(request: Request) -> Response:
         )
     except TopologyBuildError as exc:
         # This normally represents a parser invariant failure; malformed input must still be 422.
-        return _structural_response([{"code": "topology_build_error", "message": str(exc), "location": ""}])
+        return _structural_response(
+            [{"code": "topology_build_error", "message": str(exc), "location": ""}]
+        )
+    except (TypeError, ValueError, KeyError, AttributeError, RecursionError) as exc:
+        # Malformed manifest content must never escape as a bare 500 to the splicing engineer.
+        logger.warning("rejected malformed manifest: %s", exc, exc_info=True)
+        return _structural_response(
+            [
+                {
+                    "code": "invalid_manifest",
+                    "message": f"manifest could not be processed: {type(exc).__name__}: {exc}",
+                    "location": "",
+                }
+            ]
+        )
 
-    report = analyze_graph(graph)
-    # Topology conflicts are still a normal protocol response with failure evidence.
-    return JSONResponse(status_code=200, content=report)
+    try:
+        return JSONResponse(status_code=200, content=report)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive serialization guard
+        logger.error("report could not be serialized: %s", exc, exc_info=True)
+        return _structural_response(
+            [
+                {
+                    "code": "report_serialization_error",
+                    "message": "internal proof report contained non-serializable content",
+                    "location": "",
+                }
+            ]
+        )
 
 
 def _structural_response(errors: list[dict[str, str]]) -> JSONResponse:

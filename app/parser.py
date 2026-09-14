@@ -66,6 +66,10 @@ def parse_yaml(text: str) -> Manifest:
     validator = _ManifestValidator()
     try:
         documents = list(yaml.load_all(text, Loader=StrictLoader))  # noqa: S506 - StrictLoader is SafeLoader-derived
+    except RecursionError as exc:
+        raise ManifestError([
+            ValidationIssue("invalid_yaml", f"YAML contains cyclic aliases or excessive nesting: {exc}", "")
+        ]) from exc
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         loc = f"line {mark.line + 1}, column {mark.column + 1}" if mark else ""
@@ -108,6 +112,13 @@ class _ManifestValidator:
             self.fail("version must be the integer 1", "$.version", "invalid_version")
 
         routes = self._routes(data.get("routes", []))
+        if data.get("routes") == []:
+            self.fail(
+                "a splicing manifest must declare at least one office-to-subscriber route; "
+                "an empty book cannot be proved as serviceable",
+                "$.routes",
+                "empty_routes",
+            )
         segments = self._segments(data.get("segments", []))
         joints = self._joints(data.get("joints", []))
         caps = self._caps(data.get("caps", []))
@@ -559,6 +570,34 @@ class _ManifestValidator:
 
         for joint in joints:
             role(joint.id, "joint", f"joint {joint.id}")
+
+        # A physical joint port may be listed in one splice entry OR one named bridge group.
+        # Repeating it across splice entries, bridges, or a/b groups is a structural defect of the
+        # single joint table: reject the whole book as 422 instead of interpreting it as a loop.
+        for joint in joints:
+            port_owner: dict[str, str] = {}
+
+            def claim_joint_port(port: str, owner: str, location: str) -> None:
+                previous = port_owner.get(port)
+                if previous is not None and previous != owner:
+                    self.fail(
+                        f"joint {joint.id} physical port {port!r} is written twice: "
+                        f"once in {previous!r} and once in {owner!r}",
+                        location,
+                        "duplicate_port",
+                    )
+                else:
+                    port_owner[port] = owner
+
+            for splice in joint.splices:
+                owner = f"splice[{splice.index}]"
+                claim_joint_port(splice.a[1], owner, f"joint {joint.id}")
+                claim_joint_port(splice.b[1], owner, f"joint {joint.id}")
+            for bridge in joint.test_bridges:
+                for group, ports in (("a_ports", bridge.a_ports), ("b_ports", bridge.b_ports)):
+                    owner = f"test_bridge:{bridge.id}:{group}"
+                    for port in ports:
+                        claim_joint_port(port, owner, f"bridge {bridge.id}")
 
         for segment in segments:
             for pair in segment.pairs:

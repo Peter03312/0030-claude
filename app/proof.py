@@ -728,15 +728,27 @@ def _trace_branch(
     path_vertices.reverse()
     path_edges.reverse()
     cable_pairs = []
-    for edge in path_edges:
+    swap_count = 0
+    for from_vertex, edge in zip(path_vertices, path_edges):
         if edge.type == "conductor":
             cable_pairs.append({"segment": edge.segment, "pair": edge.pair})
+        elif edge.type == "splice":
+            joint = edge.joint or ""
+            reverse = edge.u != from_vertex
+            from_port = edge.u if not reverse else edge.v
+            to_port = edge.v if not reverse else edge.u
+            from_leg = graph.nodes[joint].leg_by_port[from_port.port]
+            to_leg = graph.nodes[joint].leg_by_port[to_port.port]
+            swap_count += int(from_leg != to_leg)
     binding = graph.terminal_by_port.get(leaf)
     return {
         "entry_port": vertex_id(entry),
         "leaf_port": vertex_id(leaf),
         "terminal_kind": binding.kind if binding else None,
         "cap_id": binding.owner if binding and binding.kind == "cap" else None,
+        "cap_leg": binding.expected_leg if binding and binding.kind == "cap" else None,
+        "swap_count": swap_count,
+        "cumulative_polarity": "reversed" if swap_count % 2 else "normal",
         "cable_pairs": cable_pairs,
         "vertices": [vertex_id(v) for v in path_vertices],
     }
@@ -752,6 +764,39 @@ def _bridge_exits(trace: dict[str, Any], leg: Leg) -> dict[str, tuple[BridgeVert
                 stage["exit_port"],
             )
     return result
+
+
+def _physical_port_for_bridge(
+    graph: Graph,
+    bridge_vertex: BridgeVertex,
+    rendered_port: str,
+) -> PhysicalPort:
+    """Resolve a rendered physical port that is known to attach to *bridge_vertex*.
+
+    Looking up via adjacency avoids parsing rendered ``node/port`` strings (a node name may
+    itself contain '/') and keeps malformed input from raising during reporting.
+    """
+
+    target = PhysicalPort(*rendered_port.split("/", 1))
+    for edge in graph.vertices[bridge_vertex]:
+        candidate = edge.u if isinstance(edge.u, PhysicalPort) else edge.v
+        if candidate == target:
+            return candidate
+    # The bridge trace only names physical ports attached to this star, so this is an invariant.
+    raise KeyError(rendered_port)
+
+
+def _bridge_physical_exits(
+    graph: Graph,
+    bridge_a: BridgeVertex,
+    bridge_b: BridgeVertex,
+    port_a: str,
+    port_b: str,
+) -> tuple[PhysicalPort, PhysicalPort]:
+    return (
+        _physical_port_for_bridge(graph, bridge_a, port_a),
+        _physical_port_for_bridge(graph, bridge_b, port_b),
+    )
 
 
 def _prove_branches(
@@ -773,10 +818,8 @@ def _prove_branches(
             continue
         bva, entry_a, exit_a = bridges_a[bridge_id]
         bvb, entry_b, exit_b = bridges_b[bridge_id]
-        pa = PhysicalPort(*entry_a.split("/", 1))
-        pexit_a = PhysicalPort(*exit_a.split("/", 1))
-        pb = PhysicalPort(*entry_b.split("/", 1))
-        pexit_b = PhysicalPort(*exit_b.split("/", 1))
+        pa, pb = _bridge_physical_exits(graph, bva, bvb, entry_a, entry_b)
+        pexit_a, pexit_b = _bridge_physical_exits(graph, bva, bvb, exit_a, exit_b)
 
         branches_a = _all_branch_traces(graph, bva, pa, pexit_a)
         branches_b = _all_branch_traces(graph, bvb, pb, pexit_b)
@@ -803,14 +846,44 @@ def _prove_branches(
             ba, bb = by_cap_a[cap_id], by_cap_b[cap_id]
             key_a = [(p["segment"], p["pair"]) for p in ba["cable_pairs"]]
             key_b = [(p["segment"], p["pair"]) for p in bb["cable_pairs"]]
-            sealed = key_a == key_b
-            if not sealed:
+            same_pairs = key_a == key_b
+            if not same_pairs:
                 faults.append((
                     "test_bridge_pair_mismatch",
                     f"test bridge {bridge_id} A/B bypasses to cap {cap_id} use different cable pairs",
                     [ba["entry_port"], bb["entry_port"]],
                     {"bridge": bridge_id, "cap_id": cap_id, "a_pairs": key_a, "b_pairs": key_b},
                 ))
+            cap_legs_ok = ba.get("cap_leg") == "A" and bb.get("cap_leg") == "B"
+            if not cap_legs_ok:
+                faults.append((
+                    "test_bridge_bypass_reversed",
+                    f"test bridge {bridge_id} bypass A/B parity is crossed at cap {cap_id}: "
+                    f"A bridge reaches cap {ba.get('cap_leg')}, B bridge reaches cap {bb.get('cap_leg')}",
+                    sorted([ba["entry_port"], ba["leaf_port"], bb["entry_port"], bb["leaf_port"]]),
+                    {
+                        "bridge": bridge_id,
+                        "cap_id": cap_id,
+                        "a_branch_leaf": ba["leaf_port"],
+                        "a_cap_leg": ba.get("cap_leg"),
+                        "b_branch_leaf": bb["leaf_port"],
+                        "b_cap_leg": bb.get("cap_leg"),
+                    },
+                ))
+            swap_parity_ok = (ba.get("swap_count", 0) % 2) == 0 and (bb.get("swap_count", 0) % 2) == 0
+            if not swap_parity_ok:
+                faults.append((
+                    "test_bridge_bypass_reversed",
+                    f"test bridge {bridge_id} bypass contains an odd A/B swap before cap {cap_id}",
+                    sorted([ba["entry_port"], ba["leaf_port"], bb["entry_port"], bb["leaf_port"]]),
+                    {
+                        "bridge": bridge_id,
+                        "cap_id": cap_id,
+                        "a_swaps": ba.get("swap_count"),
+                        "b_swaps": bb.get("swap_count"),
+                    },
+                ))
+            sealed = same_pairs and cap_legs_ok and swap_parity_ok
             reports.append(
                 {
                     "bridge_id": bridge_id,
