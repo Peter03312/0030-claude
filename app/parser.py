@@ -108,8 +108,15 @@ class _ManifestValidator:
         for key in sorted(self.REQUIRED_TOP_LEVEL - set(data)):
             self.fail(f"required field {key!r} is missing", f"$.{key}", "missing_field")
 
-        if data.get("version") != 1:
-            self.fail("version must be the integer 1", "$.version", "invalid_version")
+        # bool is a subclass of int in Python (True == 1), so check the exact type:
+        # only the integer literal 1 is the manifest version. ``true`` and ``1.0`` are rejected.
+        version = data.get("version")
+        if type(version) is not int or version != 1:
+            self.fail(
+                "version must be the integer literal 1 (booleans and floats such as true or 1.0 are invalid)",
+                "$.version",
+                "invalid_version",
+            )
 
         routes = self._routes(data.get("routes", []))
         if data.get("routes") == []:

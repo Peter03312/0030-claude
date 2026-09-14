@@ -773,14 +773,13 @@ def _physical_port_for_bridge(
 ) -> PhysicalPort:
     """Resolve a rendered physical port that is known to attach to *bridge_vertex*.
 
-    Looking up via adjacency avoids parsing rendered ``node/port`` strings (a node name may
-    itself contain '/') and keeps malformed input from raising during reporting.
+    Matching is done by the rendered ``node/port`` form instead of splitting it back apart:
+    field node names may themselves contain ``/``, which a naive ``split("/", 1)`` would corrupt.
     """
 
-    target = PhysicalPort(*rendered_port.split("/", 1))
     for edge in graph.vertices[bridge_vertex]:
         candidate = edge.u if isinstance(edge.u, PhysicalPort) else edge.v
-        if candidate == target:
+        if vertex_id(candidate) == rendered_port:
             return candidate
     # The bridge trace only names physical ports attached to this star, so this is an invariant.
     raise KeyError(rendered_port)

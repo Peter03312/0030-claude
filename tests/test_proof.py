@@ -9,6 +9,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.http_report import app
@@ -391,6 +392,79 @@ def test_crossed_bridge_bypass_at_cap_is_failure_evidence():
     route = report["routes"][0]
     assert route["proved"] is False
     assert route["test_bridge_bypasses"][0]["sealed"] is False
+
+
+SLASH_NODE_BRIDGE_MANIFEST = """
+version: 1
+routes:
+  - id: R1
+    expected_polarity: normal
+    office: {a: {node: "CO/01", port: OA}, b: {node: "CO/01", port: OB}}
+    subscriber: {a: {node: "SUB-9/2", port: SA}, b: {node: "SUB-9/2", port: SB}}
+segments:
+  - id: FEED
+    pairs:
+      - pair: PF
+        a: {endpoints: [{node: "CO/01", port: OA}, {node: "J/1", port: inA}]}
+        b: {endpoints: [{node: "CO/01", port: OB}, {node: "J/1", port: inB}]}
+  - id: THROUGH
+    pairs:
+      - pair: PT
+        a: {endpoints: [{node: "J/1", port: outA}, {node: "SUB-9/2", port: SA}]}
+        b: {endpoints: [{node: "J/1", port: outB}, {node: "SUB-9/2", port: SB}]}
+  - id: BYPASS
+    pairs:
+      - pair: PB
+        a: {endpoints: [{node: "J/1", port: tapA}, {node: "TIP/3", port: capA}]}
+        b: {endpoints: [{node: "J/1", port: tapB}, {node: "TIP/3", port: capB}]}
+joints:
+  - id: "J/1"
+    splices: []
+    test_bridges:
+      - id: TB1
+        a_ports: [inA, outA, tapA]
+        b_ports: [inB, outB, tapB]
+caps:
+  - id: CAP1
+    a: {node: "TIP/3", port: capA}
+    b: {node: "TIP/3", port: capB}
+open_ends: []
+"""
+
+
+def test_node_names_with_slash_still_prove_named_bridge():
+    report = analyze_text(SLASH_NODE_BRIDGE_MANIFEST)
+    assert report["status"] == "proved"
+    assert report["serviceable"] is True
+    assert report["faults"] == []
+    route = report["routes"][0]
+    bypass = route["test_bridge_bypasses"][0]
+    assert bypass["sealed"] is True
+    assert bypass["a"]["leaf_port"] == "TIP/3/capA"
+    assert bypass["b"]["leaf_port"] == "TIP/3/capB"
+    assert route["path_a"]["joint_stages"][0]["entry_port"] == "J/1/inA"
+    assert route["path_a"]["joint_stages"][0]["exit_port"] == "J/1/outA"
+
+
+@pytest.mark.parametrize("version_value", ["true", "1.0", '"1"', "0", "2", "false"])
+def test_non_integer_version_is_structural_422_never_serviceable(version_value):
+    manifest = f"""
+version: {version_value}
+routes: []
+segments: []
+joints: []
+caps: []
+"""
+    response = client.post(
+        "/prove",
+        content=textwrap.dedent(manifest),
+        headers={"Content-Type": "application/yaml"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "invalid_manifest"
+    assert body["serviceable"] is False
+    assert any(error["code"] == "invalid_version" for error in body["errors"])
 
 
 def test_malformed_content_returns_structural_422_not_500():
